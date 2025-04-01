@@ -6,14 +6,8 @@ describe('Factory.build', () => {
 
   beforeEach(() => {
     factory = new Factory();
-
-    // Stub Factory.get to always return our factory instance.
     jest.spyOn(Factory, 'get').mockReturnValue(factory);
-
-    // Stub factory.build to return 'fake result'.
     jest.spyOn(factory, 'build').mockReturnValue('fake result');
-
-    // Call the method under test.
     result = Factory.build('factory', 'attrs', 'options');
   });
 

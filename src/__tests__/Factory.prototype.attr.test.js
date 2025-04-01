@@ -3,6 +3,7 @@ const { randomString, randomInt } = require('./helpers');
 
 describe('Factory.prototype.attr', () => {
   let factory;
+
   beforeEach(() => {
     factory = new Factory();
   });
@@ -34,6 +35,7 @@ describe('Factory.prototype.attr', () => {
 
   describe('dynamic attribute', () => {
     let field, value;
+
     beforeEach(() => {
       field = randomString();
       value = randomInt();
@@ -51,6 +53,7 @@ describe('Factory.prototype.attr', () => {
 
   describe('with dependencies', () => {
     let fieldOne, valueOne, fieldTwo, valueTwo;
+
     beforeEach(() => {
       fieldOne = randomString();
       valueOne = randomInt();

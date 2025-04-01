@@ -2,6 +2,7 @@ const { Factory } = require('../rosie');
 
 describe('Factory.createList', () => {
   let factory, result;
+
   beforeEach(() => {
     factory = new Factory();
     jest.spyOn(Factory, 'get').mockReturnValue(factory);
