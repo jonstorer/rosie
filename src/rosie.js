@@ -11,7 +11,13 @@ class Factory {
     this._attrs = {};
     this.opts = {};
     this.sequences = {};
-    this.callbacks = [];
+    // this.callbacks = [];
+
+    this.beforeBuildHooks = [];
+    this.afterBuildHooks = [];
+    this.beforeCreateHooks = [];
+    this.createHandler = null;
+    this.afterCreateHooks = [];
 
     Factory._allFactories.push(this);
   }
@@ -163,6 +169,32 @@ class Factory {
   }
 
   /**
+   * Sets a pre-processor hook that will receive provided attributes
+   * and the options for the build just before they are sent to
+   * the #attributes function
+   *
+   * @param {function(object, object=)} callback
+   * @return {Factory}
+   */
+  beforeBuild(hook) {
+    this.beforeBuildHooks.push(hook);
+    return this;
+  }
+
+  /**
+   * Sets a post-processor callback that will receive built objects and the
+   * options for the build just before they are returned from the #build
+   * function.
+   *
+   * @param {function(object, object=)} callback
+   * @return {Factory}
+   */
+  afterBuild(hook) {
+    this.afterBuildHooks.push(hook);
+    return this;
+  }
+
+  /**
    * Sets a post-processor callback that will receive built objects and the
    * options for the build just before they are returned from the #build
    * function.
@@ -171,7 +203,43 @@ class Factory {
    * @return {Factory}
    */
   after(callback) {
-    this.callbacks.push(callback);
+    this.afterBuild(callback);
+    return this;
+  }
+
+  /**
+   * Sets a pre-processor async callback that will receive the built object and the
+   * options for the build just before the createHandler is called
+   *
+   * @param {function(object, object=)} callback
+   * @return {Factory}
+   */
+  beforeCreate(callback) {
+    this.beforeCreateHooks.push(callback);
+    return this;
+  }
+
+  /**
+   * Sets a processor async callback that will receive built object and the
+   * options for the build just after the beforeCreate processors are called
+   *
+   * @param {function(object, object=)} callback
+   * @return {Factory}
+   */
+  onCreate(onCreateHandler) {
+    this.createHandler = onCreateHandler;
+    return this;
+  }
+
+  /**
+   * Sets a post-processor async callback that will receive the built object and the
+   * options for the build just after the createHandler is called
+   *
+   * @param {function(object, object=)} callback
+   * @return {Factory}
+   */
+  afterCreate(callback) {
+    this.afterCreateHooks.push(callback);
     return this;
   }
 
@@ -311,29 +379,98 @@ class Factory {
     // Because options cannot depend on themselves or on attributes, subsequent calls to
     // `this.options` will be idempotent and we can avoid re-running builders
     options = this.options(options);
-    const result = this.attributes(attributes, options);
-    let retval = null;
+    attributes = attributes || {};
 
-    if (this.construct) {
-      const Constructor = this.construct;
-      retval = new Constructor(result);
-    } else {
-      retval = result;
-    }
+    return Factory.util.nextHook(
+      0,
+      this.beforeBuildHooks,
+      attributes,
+      options,
+      (attributes) => {
+        let result = this.attributes(attributes, options);
+        if (this.construct) result = new this.construct(result);
 
-    for (let i = 0; i < this.callbacks.length; i++) {
-      const callbackResult = this.callbacks[i](retval, options);
-      retval = callbackResult || retval;
-    }
-    return retval;
+        return Factory.util.nextHook(
+          0,
+          this.afterBuildHooks,
+          result,
+          options,
+          (maybeResult) => {
+            return maybeResult || result;
+          }
+        );
+      }
+    );
   }
 
   buildList(size, attributes, options) {
+    let containsPromise = false;
+
     const objs = [];
     for (let i = 0; i < size; i++) {
-      objs.push(this.build(attributes, options));
+      const obj = this.build(attributes, options);
+
+      if (Factory.util.isPromise(obj)) containsPromise = true;
+
+      objs.push(obj);
     }
-    return objs;
+
+    return containsPromise ? Promise.all(objs) : objs;
+  }
+
+  /**
+   * Passes built objects through async beforeCreate functions,
+   * a create function, and afterCreate functions
+   * and returns the result
+   *
+   * @param {object=} attributes
+   * @param {object=} options
+   * @return {*}
+   */
+  create(attributes, options) {
+    const maybePromise = this.build(attributes, options);
+
+    return Factory.util.after(maybePromise, (object) => {
+      return Factory.util.nextHook(
+        0,
+        this.beforeCreateHooks,
+        object,
+        options,
+        (maybeResult) => {
+          object = maybeResult || object;
+          const maybePromise = this.createHandler
+            ? this.createHandler(object, options)
+            : null;
+          return Factory.util.after(maybePromise, (maybeResult) => {
+            object = maybeResult || object;
+            return Factory.util.nextHook(
+              0,
+              this.afterCreateHooks,
+              object,
+              options,
+              (maybeResult) => {
+                return maybeResult || object;
+              }
+            );
+          });
+        }
+      );
+    });
+  }
+
+  createList(size, attributes, options) {
+    let containsPromise = false;
+
+    const objs = [];
+    for (let i = 0; i < size; i++) {
+      const obj = this.create(attributes, options);
+
+      if (Factory.util.isPromise(obj)) containsPromise = true;
+
+      objs.push(obj);
+    }
+
+    return containsPromise ? Promise.all(objs) : objs;
   }
 
   /**
@@ -345,15 +482,20 @@ class Factory {
    * @return {Factory}
    */
   extend(name) {
-    const factory = typeof name === 'string' ? Factory.factories[name] : name;
-    // Copy the parent's constructor
-    if (this.construct === undefined) {
-      this.construct = factory.construct;
-    }
+    const factory = typeof name === 'string' ? Factory.get(name) : name;
+    this.construct = this.construct || factory.construct; // Copy the parent's constructor
+
     Object.assign(this._attrs, factory._attrs);
     Object.assign(this.opts, factory.opts);
-    // Copy the parent's callbacks
-    this.callbacks = factory.callbacks.slice();
+
+    // Copy the parent's hooks
+    this.beforeBuildHooks = factory.beforeBuildHooks.slice();
+    this.afterBuildHooks = factory.afterBuildHooks.slice();
+
+    this.beforeCreateHooks = factory.beforeCreateHooks.slice();
+    this.createHandler = this.createHandler || factory.createHandler; // needs test for not overritting
+    this.afterCreateHooks = factory.afterCreateHooks.slice();
+
     return this;
   }
 
@@ -371,6 +513,18 @@ Object.defineProperty(Factory, '_allFactories', {
   value: [],
   enumerable: false,
 });
+
+/**
+ * Retrieve a factory from the registrar
+ *
+ * @param {!string} name
+ * @return {Factory}
+ */
+Factory.get = function (name) {
+  const factory = this.factories[name];
+  if (!factory) throw new Error(`The "${name}" factory is not defined.`);
+  return factory;
+};
 
 /**
  * Defines a factory by name and constructor function. Call #attr and #option
@@ -395,10 +549,7 @@ Factory.define = function (name, constructor) {
  * @return {*}
  */
 Factory.build = function (name, attributes, options) {
-  if (!this.factories[name]) {
-    throw new Error(`The "${name}" factory is not defined.`);
-  }
-  return this.factories[name].build(attributes, options);
+  return this.get(name).build(attributes, options);
 };
 
 /**
@@ -411,11 +562,32 @@ Factory.build = function (name, attributes, options) {
  * @return {Array.<*>}
  */
 Factory.buildList = function (name, size, attributes, options) {
-  const objs = [];
-  for (let i = 0; i < size; i++) {
-    objs.push(Factory.build(name, attributes, options));
-  }
-  return objs;
+  return this.get(name).buildList(size, attributes, options);
+};
+
+/**
+ * Locates a factory by name and calls #create on it.
+ *
+ * @param {string} name
+ * @param {object=} attributes
+ * @param {object=} options
+ * @return {*}
+ */
+Factory.create = function (name, attributes, options) {
+  return this.get(name).create(attributes, options);
+};
+
+/**
+ * Creates a collection of objects using the named factory.
+ *
+ * @param {string} name
+ * @param {number} size
+ * @param {object=} attributes
+ * @param {object=} options
+ * @return {Array.<*>}
+ */
+Factory.createList = function (name, size, attributes, options) {
+  return this.get(name).createList(size, attributes, options);
 };
 
 /**
@@ -427,7 +599,7 @@ Factory.buildList = function (name, size, attributes, options) {
  * @return {object}
  */
 Factory.attributes = function (name, attributes, options) {
-  return this.factories[name].attributes(attributes, options);
+  return this.get(name).attributes(attributes, options);
 };
 
 /**
@@ -436,7 +608,8 @@ Factory.attributes = function (name, attributes, options) {
  * @param {string} name
  */
 Factory.reset = function (name) {
-  Factory.factories[name].reset();
+  // Factory.factories[name].reset();
+  Factory.get(name).reset();
 };
 
 /**
@@ -453,6 +626,44 @@ Factory.implode = function () {
   Factory.factories = {};
   Factory._allFactories.length = 0;
 };
+
+/**
+ * @private
+ */
+Factory.util = (function () {
+  return {
+    isObject: function isObject(value) {
+      return value !== null && typeof value === 'object';
+    },
+
+    isFunction: function isFunction(value) {
+      return typeof value === 'function';
+    },
+
+    isPromise: function isPromise(value) {
+      return (
+        Factory.util.isObject(value) && Factory.util.isFunction(value.then)
+      );
+    },
+
+    after: function after(maybePromise, next) {
+      return Factory.util.isPromise(maybePromise)
+        ? maybePromise.then(next)
+        : next(maybePromise);
+    },
+
+    nextHook: function nextHook(index, hooks, object, options, next) {
+      const hook = hooks[index];
+      if (!hook) return next(object);
+
+      const maybePromise = hook(object, options);
+      return Factory.util.after(maybePromise, (maybeResult) => {
+        object = maybeResult || object;
+        return Factory.util.nextHook(++index, hooks, object, options, next);
+      });
+    },
+  };
+})();
 
 /* istanbul ignore next */
 if (typeof exports === 'object' && typeof module !== 'undefined') {
